@@ -40,12 +40,12 @@ jobs:
 
       - name: Show build output
         run: |
-          echo "Contents of ./build:" || true
-          ls -la ./build || true
+          echo "Contents of ~/build:" || true
+          ls -la ~/build || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: aseprite-build
           path: |
-            build/**
+            ~/build/**
