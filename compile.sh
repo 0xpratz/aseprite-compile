@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Where to place final artifacts (default ./build). Override with OUTPUT_NAME or absolute BUILD_DIR.
 OUTPUT_NAME="${OUTPUT_NAME:-build}"
-BASE_DIR="$(pwd)"
+BASE_DIR="${HOME}"
 BUILD_DIR="${BUILD_DIR:-${BASE_DIR}/${OUTPUT_NAME}}"
 
 # temp workdir
