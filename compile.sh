@@ -1,176 +1,164 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e  # Exit on any error
 
-# Configurable:
-OUTPUT_NAME="${OUTPUT_NAME:-build}"
-BASE_DIR="${HOME:-/root}"
-BUILD_DIR="${BUILD_DIR:-${BASE_DIR}/${OUTPUT_NAME}}"
+# CI-friendly version - no interactive prompts, uses BUILD_DIR env var
 
-# Tools we need
-REQUIRED_CMDS=(curl wget mktemp rm unzip tar find sed awk chmod cp mkdir mv grep)
-
-for cmd in "${REQUIRED_CMDS[@]}"; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "Missing required command: $cmd" >&2
-    echo "Install it and retry." >&2
-    exit 2
-  fi
-done
-
-# Helpers
-die() { echo "ERROR: $*" >&2; exit 1; }
-info() { echo "info: $*"; }
-
-WORK_DIR="$(mktemp -d -t compile-aseprite-XXXXX)"
-trap 'rc=$?; rm -rf "${WORK_DIR}" || true; exit ${rc}' EXIT
-
-cd "${WORK_DIR}"
-
-GITHUB_API="https://api.github.com/repos/aseprite/aseprite/releases/latest"
-info "Fetching release metadata from GitHub..."
-RELEASE_JSON="$(curl -sL "${GITHUB_API}")" || die "Failed to fetch release metadata."
-
-# Prefer release asset ending with tar.gz or .zip, otherwise take first browser_download_url,
-# otherwise fall back to zipball_url (source code) which is at top-level of release object.
-SOURCE_URL=""
-# try to get preferred asset (tar.gz or zip)
-SOURCE_URL="$(printf '%s\n' "${RELEASE_JSON}" \
-  | awk -F\" '/browser_download_url/ {print $4}' \
-  | grep -E '\.tar\.gz$|\.tgz$|\.zip$|\.tar\.xz$' \
-  | head -n1 || true )"
-
-# if not found, try first browser_download_url
-if [[ -z "${SOURCE_URL}" ]]; then
-  SOURCE_URL="$(printf '%s\n' "${RELEASE_JSON}" | awk -F\" '/browser_download_url/ {print $4; exit}')"
+# Use BUILD_DIR if set (for CI), otherwise default to ~/output
+if [[ -z "${BUILD_DIR}" ]]; then
+    BUILD_DIR="${HOME}/output"
 fi
 
-# if still not found, fall back to zipball_url / tarball_url
-if [[ -z "${SOURCE_URL}" ]]; then
-  SOURCE_URL="$(printf '%s\n' "${RELEASE_JSON}" | awk -F\" '/"zipball_url"/ {print $4; exit}')"
-fi
-if [[ -z "${SOURCE_URL}" ]]; then
-  SOURCE_URL="$(printf '%s\n' "${RELEASE_JSON}" | awk -F\" '/"tarball_url"/ {print $4; exit}')"
-fi
+INSTALL_DIR="${BUILD_DIR}/aseprite"
+BINARY_DIR="${BUILD_DIR}/bin"
+LAUNCHER_DIR="${BUILD_DIR}/applications"
 
-if [[ -z "${SOURCE_URL}" ]]; then
-  die "Could not determine a release download URL from GitHub API."
-fi
+SIGNATURE_FILE="${INSTALL_DIR}/compile-aseprite-linux"
+BINARY_FILE="${BINARY_DIR}/aseprite"
+LAUNCHER_FILE="${LAUNCHER_DIR}/aseprite.desktop"
+ICON_FILE="${INSTALL_DIR}/data/icons/ase256.png"
 
-info "Determined source URL: ${SOURCE_URL}"
+echo "Building Aseprite to: ${BUILD_DIR}"
 
-# Pick filename based on URL
-FNAME="$(basename "${SOURCE_URL}" | sed 's/[^A-Za-z0-9._-]/_/g')"
-# if URL is something like zipball or tarball without extension, name it release-archive
-if [[ "${FNAME}" == "" || "${FNAME}" == "release" ]]; then
-  FNAME="release-archive"
-fi
-
-DOWNLOAD_PATH="${WORK_DIR}/${FNAME}"
-
-info "Downloading to ${DOWNLOAD_PATH}..."
-# Use curl if it's a zipball/tarball (curl preserves headers), fallback to wget
-if command -v curl >/dev/null 2>&1; then
-  curl -L --fail -o "${DOWNLOAD_PATH}" "${SOURCE_URL}" || die "Download failed: ${SOURCE_URL}"
+# In CI mode, always clean and rebuild
+if [[ -n "${CI}" ]] || [[ -n "${GITHUB_ACTIONS}" ]]; then
+    echo "CI environment detected - cleaning any existing installation"
+    rm -rf "${INSTALL_DIR}" "${BINARY_DIR}" "${LAUNCHER_DIR}"
 else
-  wget -O "${DOWNLOAD_PATH}" "${SOURCE_URL}" || die "Download failed: ${SOURCE_URL}"
-fi
-
-# Try to detect archive type and extract accordingly
-extract_dir="${WORK_DIR}/src"
-mkdir -p "${extract_dir}"
-
-case "${DOWNLOAD_PATH}" in
-  *.zip)
-    info "Extracting zip..."
-    unzip -q "${DOWNLOAD_PATH}" -d "${extract_dir}" || die "Unzip failed."
-    ;;
-  *.tar.gz|*.tgz)
-    info "Extracting tar.gz..."
-    tar -xzf "${DOWNLOAD_PATH}" -C "${extract_dir}" || die "tar -xzf failed."
-    ;;
-  *.tar.xz)
-    info "Extracting tar.xz..."
-    tar -xJf "${DOWNLOAD_PATH}" -C "${extract_dir}" || die "tar -xJf failed."
-    ;;
-  *)
-    # If file has no extension, attempt to extract as tar, then zip; if neither, treat as single file
-    if tar -tf "${DOWNLOAD_PATH}" >/dev/null 2>&1; then
-      info "Extracting (tar autodetect)..."
-      tar -xf "${DOWNLOAD_PATH}" -C "${extract_dir}" || die "tar -xf failed."
-    elif unzip -t "${DOWNLOAD_PATH}" >/dev/null 2>&1; then
-      info "Extracting (zip autodetect)..."
-      unzip -q "${DOWNLOAD_PATH}" -d "${extract_dir}" || die "Unzip failed."
+    # Interactive mode for local builds
+    if [[ -f "${SIGNATURE_FILE}" ]] ; then
+        read -e -p "Aseprite already installed. Update? (y/N): " choice
+        [[ "${choice}" == [Yy]* ]] || exit 0
     else
-      info "Downloaded file is not an archive; saving as-is."
-      mkdir -p "${extract_dir}/single-file"
-      mv "${DOWNLOAD_PATH}" "${extract_dir}/single-file/$(basename "${DOWNLOAD_PATH}")"
+        [[ -d "${INSTALL_DIR}" ]] \
+            && { echo "Aseprite already installed to '${INSTALL_DIR}'. Aborting" >&2 ; exit 1 ; }
+        { [[ -f "${LAUNCHER_FILE}" ]] || [[ -f "${BINARY_FILE}" ]] ; } \
+            && { echo "Other aseprite data already installed to output directory. Aborting" >&2 ; exit 1 ; }
     fi
-    ;;
-esac
-
-# Find the directory containing build.sh (aseprite's upstream build script)
-info "Locating source directory (searching for build.sh)..."
-SOURCE_DIR="$(find "${extract_dir}" -type f -name build.sh -print -quit || true)"
-if [[ -z "${SOURCE_DIR}" ]]; then
-  die "Could not find build.sh in extracted archive. Aborting."
-fi
-SOURCE_DIR="$(dirname "${SOURCE_DIR}")"
-info "Found build script in: ${SOURCE_DIR}"
-cd "${SOURCE_DIR}"
-
-# Ensure build.sh executable
-chmod +x ./build.sh || true
-
-# Run build. Upstream build.sh may require dependencies; we do a best-effort run.
-info "Running build.sh --auto --norun (this may require external build deps)..."
-if ! ./build.sh --auto --norun; then
-  die "Upstream build script failed. Check the output above for missing dependencies."
 fi
 
-# Prepare BUILD_DIR
-rm -rf -- "${BUILD_DIR}"
-mkdir -p "${BUILD_DIR}/data/icons"
-
-# Collect outputs. Look in common locations; fall back to searching for an executable named 'aseprite'
-if [[ -d "build/bin" ]]; then
-  info "Copying files from build/bin to ${BUILD_DIR}..."
-  cp -a build/bin/* "${BUILD_DIR}/" || die "Failed to copy build/bin contents."
-elif [[ -d "bin" ]]; then
-  info "Copying files from bin to ${BUILD_DIR}..."
-  cp -a bin/* "${BUILD_DIR}/" || die "Failed to copy bin contents."
+# Create or use temp directory
+if [[ -z "${TESTING}" ]] && [[ -z "${CI}" ]] && [[ -z "${GITHUB_ACTIONS}" ]] ; then
+    WORK_DIR=$(mktemp -d -t 'compile-aseprite-linux-XXXXX') \
+        || { echo "Unable to create temp folder" >&2 ; exit 1 ; }
 else
-  # try to find an executable named aseprite
-  ASEPI="$(find . -type f -name 'aseprite' -perm /111 -print -quit || true)"
-  if [[ -n "${ASEPI}" ]]; then
-    info "Found aseprite executable at ${ASEPI}; copying to ${BUILD_DIR}/aseprite"
-    cp -a "${ASEPI}" "${BUILD_DIR}/aseprite" || die "Failed to copy aseprite executable."
-  else
-    # try to find any likely binary under build/
-    ANYBIN="$(find build -type f -perm /111 -print -quit || true)"
-    if [[ -n "${ANYBIN}" ]]; then
-      info "Copying found executable ${ANYBIN} to ${BUILD_DIR}/"
-      cp -a "${ANYBIN}" "${BUILD_DIR}/" || die "Failed to copy discovered executable."
+    WORK_DIR="${BUILD_DIR}/temp-build"
+    mkdir -p "${WORK_DIR}"
+fi
+WORK_DIR="$(realpath "${WORK_DIR}")"
+
+echo "Working directory: ${WORK_DIR}"
+
+cleanup() {
+    code=$?
+    echo "Cleaning up."
+    if [[ -z "${TESTING}" ]] && [[ -z "${CI}" ]] && [[ -z "${GITHUB_ACTIONS}" ]] ; then
+        echo "Removing temporary work directory: ${WORK_DIR}"
+        rm -rf "${WORK_DIR}"
     else
-      die "No build outputs found (checked build/bin, bin, and searched for executables)."
+        echo "Keeping work directory for CI: ${WORK_DIR}"
     fi
-  fi
+    exit "${code}"
+}
+
+trap "cleanup" EXIT
+
+pushd "${WORK_DIR}"
+
+# Download latest version of aseprite
+echo "Fetching latest Aseprite release info..."
+SOURCE_CODE=$(curl -s "https://api.github.com/repos/aseprite/aseprite/releases/latest" | awk '/browser_download_url/ {print $2}' | tr -d \")
+
+if [[ -z "${SOURCE_CODE}" ]]; then
+    echo "Failed to fetch release URL" >&2
+    exit 1
 fi
 
-# Copy .desktop and icons (best-effort)
-if [[ -f "src/desktop/linux/aseprite.desktop" ]]; then
-  cp -f "src/desktop/linux/aseprite.desktop" "${BUILD_DIR}/aseprite.desktop" || true
+echo "Downloading Aseprite source code..."
+wget -q --show-progress $SOURCE_CODE \
+    || { echo "Unable to download the latest version of Aseprite." >&2 ; exit 1 ; }
+echo "Aseprite downloaded from: ${SOURCE_CODE}"
+
+# FILE is a filename like Aseprite-vX.X.X.X-Source.zip
+FILE=$(echo $SOURCE_CODE | awk -F/ '{print $NF}')
+
+# Unzip the source code
+echo "Extracting source code..."
+unzip -q $FILE -d aseprite \
+    || { echo "Unable to decompress the source code, make sure you have the unzip package installed." >&2 ; exit 1 ; }
+echo "${FILE} extracted."
+
+# Only check for dependencies if not in CI (CI installs them separately)
+if [[ -z "${CI}" ]] && [[ -z "${GITHUB_ACTIONS}" ]]; then
+    echo "Checking distribution and installing dependencies..."
+    
+    # Check distro
+    os_name=$(grep 'NAME=' /etc/os-release | head -n 1 | sed 's/NAME=//' | tr -d '"')
+
+    # Assign package manager to a variable
+    if [[ "$os_name" == *"Fedora"* ]]; then
+        package_man="dnf"
+    elif [[ $os_name == *"Debian"* ]] || [[ $os_name == *"Ubuntu"* ]] || [[ $os_name == *"Mint"* ]]; then
+        package_man="apt"
+    elif [[ $os_name == *"Arch"* ]] || [[ $os_name == *"Manjaro"* ]]; then
+        package_man="pacman"
+    else
+        echo "Unsupported distro! If your distro supports APT, DNF or PACMAN, please manually modify the script."
+        echo "Stopped installation!"
+        exit 1
+    fi
+
+    echo "Enter sudo password to install dependencies. This is also a good time to plug in your computer, since compiling will take a long time."
+
+    # Install dependencies
+    if [[ $package_man == "dnf" ]]; then
+        cat aseprite/INSTALL.md | grep -m1 "sudo dnf install" | bash 
+    elif [[ $package_man == "apt" ]]; then
+        cat aseprite/INSTALL.md | grep -m1 "sudo apt-get install" | bash
+    elif [[ $package_man == "pacman" ]]; then
+        deps=$(cat aseprite/INSTALL.md | grep -m1 "sudo pacman -S")
+        deps=${deps/-S/-S --needed --noconfirm} 
+        bash -c "$deps"
+    fi
+
+    [[ $? == 0 ]] \
+        || { echo "Failed to install dependencies." >&2 ; exit 1 ; }
+else
+    echo "CI environment - skipping dependency installation (handled by workflow)"
 fi
 
-# a few possible icon locations used upstream
-if [[ -f "data/icons/ase256.png" ]]; then
-  cp -f "data/icons/ase256.png" "${BUILD_DIR}/data/icons/ase256.png" || true
-elif [[ -f "src/desktop/linux/ase256.png" ]]; then
-  cp -f "src/desktop/linux/ase256.png" "${BUILD_DIR}/data/icons/ase256.png" || true
-elif [[ -f "resources/icons/ase256.png" ]]; then
-  cp -f "resources/icons/ase256.png" "${BUILD_DIR}/data/icons/ase256.png" || true
-fi
+pushd aseprite
 
-# Signature marker
-touch "${BUILD_DIR}/compile-aseprite-linux"
+# Compile Aseprite with the provided build.sh script in the source code
+echo "Starting Aseprite compilation (this may take a while)..."
+./build.sh --auto --norun \
+    || { echo "Compilation failed." >&2 ; exit 1 ; }
 
-info "Build complete. Artifacts placed in: ${BUILD_DIR}"
+popd
+
+# Prepare installation directories
+echo "Installing compiled files..."
+rm -rf "${INSTALL_DIR}"
+mkdir -p "${INSTALL_DIR}" "${BINARY_DIR}" "${LAUNCHER_DIR}" \
+    || { echo "Unable to create install folder." >&2 ; exit 1 ; }
+
+# Move compiled files and create symlinks
+{ mv aseprite/build/bin/* "${INSTALL_DIR}" \
+    && touch "${SIGNATURE_FILE}" \
+    && ln -sf "${INSTALL_DIR}/aseprite" "${BINARY_FILE}" \
+    && cp -f "${WORK_DIR}/aseprite/src/desktop/linux/aseprite.desktop" "${LAUNCHER_FILE}" \
+; } || { echo "Failed to complete install." >&2 ; exit 1 ; }
+
+# Replace the values on the .desktop file to the correct ones
+sed -i "s|$(grep -m1 TryExec= "${LAUNCHER_FILE}")|TryExec=$BINARY_FILE|g" "${LAUNCHER_FILE}"
+sed -i "s|$(grep -m1 Exec= "${LAUNCHER_FILE}")|Exec=$BINARY_FILE %U|g" "${LAUNCHER_FILE}"
+sed -i "s|$(grep -m1 Icon= "${LAUNCHER_FILE}")|Icon=$ICON_FILE|g" "${LAUNCHER_FILE}"
+
+echo ""
+echo "✓ Done compiling!"
+echo "All files are stored in '${BUILD_DIR}':"
+echo "  - Aseprite installation: ${INSTALL_DIR}"
+echo "  - Binary symlink: ${BINARY_FILE}"
+echo "  - Desktop launcher: ${LAUNCHER_FILE}"
+echo "  - Icon: ${ICON_FILE}"
+echo ""
+echo "Have fun!"
