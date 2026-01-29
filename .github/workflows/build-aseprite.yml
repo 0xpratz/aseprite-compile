@@ -6,26 +6,24 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Building Aseprite from source can be slow — increase timeout as needed
     timeout-minutes: 180
 
-    # Make BUILD_DIR point at the repository workspace, so artifacts are inside the repo
     env:
       BUILD_DIR: ${{ github.workspace }}/build
-      OUTPUT_NAME: build
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies (adjust if your distro needs different packages)
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config git wget unzip python3 \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
             libgl1-mesa-dev libasound2-dev libpulse-dev \
-            libpng-dev libjpeg-dev libwebp-dev libfreetype6-dev libfontconfig1-dev
+            libpng-dev libjpeg-dev libwebp-dev libfreetype6-dev libfontconfig1-dev \
+            libharfbuzz-dev libtiff-dev
 
       - name: Ensure build script exists and is executable
         run: |
@@ -37,22 +35,45 @@ jobs:
           fi
 
       - name: Run build script
-        run: |
-          # build script will place artifacts in $BUILD_DIR (script reads BUILD_DIR env)
-          ./compile.sh
-        # Keep BUILD_DIR/OUTPUT_NAME visible to the build step via env
+        run: ./compile.sh
         env:
           BUILD_DIR: ${{ env.BUILD_DIR }}
-          OUTPUT_NAME: ${{ env.OUTPUT_NAME }}
+          CI: true
 
       - name: Show build output
         run: |
           echo "Contents of $BUILD_DIR:"
-          ls -la "$BUILD_DIR" || true
+          ls -lR "$BUILD_DIR" || true
+          
+          echo ""
+          echo "Checking for aseprite binary:"
+          if [[ -f "$BUILD_DIR/aseprite/aseprite" ]]; then
+            echo "✓ Aseprite binary found"
+            file "$BUILD_DIR/aseprite/aseprite"
+            "$BUILD_DIR/aseprite/aseprite" --version || true
+          else
+            echo "✗ Aseprite binary not found!"
+            exit 1
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: aseprite-build
-          path: |
-            ${{ env.BUILD_DIR }}/**
+          name: aseprite-build-${{ github.run_number }}
+          path: ${{ env.BUILD_DIR }}/aseprite/
+          retention-days: 30
+          compression-level: 9
+
+      - name: Create release-ready archive (optional)
+        run: |
+          cd "$BUILD_DIR"
+          tar -czf aseprite-linux-x64.tar.gz aseprite/
+          echo "Archive created: aseprite-linux-x64.tar.gz"
+          ls -lh aseprite-linux-x64.tar.gz
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: aseprite-linux-x64-archive
+          path: ${{ env.BUILD_DIR }}/aseprite-linux-x64.tar.gz
+          retention-days: 90
