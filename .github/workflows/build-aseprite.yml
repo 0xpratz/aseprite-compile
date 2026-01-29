@@ -1,8 +1,6 @@
 name: build-aseprite
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch: {}
 
 jobs:
@@ -26,10 +24,10 @@ jobs:
 
       - name: Ensure build script exists and is executable
         run: |
-          if [[ -f ./compile.sh ]]; then
-            chmod +x ./compile.sh
+          if [[ -f ./build-aseprite.sh ]]; then
+            chmod +x ./build-aseprite.sh
           else
-            echo "Error: build script './compile.sh' not found in repo root." >&2
+            echo "Error: build script './build-aseprite.sh' not found in repo root." >&2
             exit 1
           fi
 
@@ -38,7 +36,7 @@ jobs:
           # place artifacts under ./build inside the repository workspace
           OUTPUT_NAME: build
         run: |
-          ./compile.sh
+          ./build-aseprite.sh
 
       - name: Show build output
         run: |
