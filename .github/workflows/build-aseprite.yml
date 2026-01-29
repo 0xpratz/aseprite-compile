@@ -29,17 +29,17 @@ jobs:
 
       - name: Ensure build script exists and is executable
         run: |
-          if [[ -f ./build-aseprite.sh ]]; then
-            chmod +x ./build-aseprite.sh
+          if [[ -f ./compile.sh ]]; then
+            chmod +x ./compile.sh
           else
-            echo "Error: build script './build-aseprite.sh' not found in repo root." >&2
+            echo "Error: build script './compile.sh' not found in repo root." >&2
             exit 1
           fi
 
       - name: Run build script
         run: |
           # build script will place artifacts in $BUILD_DIR (script reads BUILD_DIR env)
-          ./build-aseprite.sh
+          ./compile.sh
         # Keep BUILD_DIR/OUTPUT_NAME visible to the build step via env
         env:
           BUILD_DIR: ${{ env.BUILD_DIR }}
