@@ -9,6 +9,11 @@ jobs:
     # Building Aseprite from source can be slow — increase timeout as needed
     timeout-minutes: 180
 
+    # Make BUILD_DIR point at the repository workspace, so artifacts are inside the repo
+    env:
+      BUILD_DIR: ${{ github.workspace }}/build
+      OUTPUT_NAME: build
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,20 +37,22 @@ jobs:
           fi
 
       - name: Run build script
-        env:
-          # place artifacts under ./build inside the repository workspace
-          OUTPUT_NAME: build
         run: |
+          # build script will place artifacts in $BUILD_DIR (script reads BUILD_DIR env)
           ./build-aseprite.sh
+        # Keep BUILD_DIR/OUTPUT_NAME visible to the build step via env
+        env:
+          BUILD_DIR: ${{ env.BUILD_DIR }}
+          OUTPUT_NAME: ${{ env.OUTPUT_NAME }}
 
       - name: Show build output
         run: |
-          echo "Contents of ~/build:" || true
-          ls -la ~/build || true
+          echo "Contents of $BUILD_DIR:"
+          ls -la "$BUILD_DIR" || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: aseprite-build
           path: |
-            ~/build/**
+            ${{ env.BUILD_DIR }}/**
